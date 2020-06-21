@@ -1,0 +1,132 @@
+'''-------------------------------------------------------------------
+  Here is the code for calculating metrics on mathematic model
+  before using this tool, you should already need a dataset
+  and then input your dataset into the tool
+  it will offer you the metrics you needed
+-----------------------------------------------------------------------'''
+
+
+
+from sklearn.linear_model import LogisticRegression
+from xgboost.sklearn import XGBClassifier  
+from sklearn import metrics
+
+
+#--------------------- AUC-ROC FUNCTION-----------------------
+# 输出AUC的函数
+def model_metric_logr1(y_real, y_pred, thres):
+    tmp = pd.merge(y_real, y_pred, how = 'left' , left_index = True, right_index = True)    
+    tmp['pred_right'] = (tmp['y'] == tmp['y3_p']) * 1
+    
+    tp = ((tmp.pred_right == 1) & (tmp.y3_p == 1)) * 1
+    fp = ((tmp.pred_right == 0) & (tmp.y3_p == 1)) * 1
+    fn = ((tmp.pred_right == 0) & (tmp.y3_p == 0)) * 1
+    tn = ((tmp.pred_right == 1) & (tmp.y3_p == 0)) * 1
+    
+    precision = tp.sum() / (tp.sum() + fp.sum())
+    recall = tp.sum() / (tp.sum() + fn.sum())
+    f1_score = 2 * precision * recall / (precision + recall)
+    
+    tpr = tp.sum() / (tp.sum() + fn.sum())
+    fpr = fp.sum() / (tn.sum() + fp.sum())
+    return [thres, recall, precision, f1_score, fpr, tpr]    
+
+
+def model_curve_logr1(y_real, pred_prob, lower_bnd, upper_bnd):
+    output = list()
+    thres = np.linspace(lower_bnd, upper_bnd, 100)  
+    for i in range(len(thres)):
+        pred_prob['y3_p'] = (pred_prob['y1'] > thres[i] ) * 1
+        y_pred1 = pred_prob[['y3_p']]
+        tmp_out = model_metric_logr1(y_real, y_pred1, thres[i])
+        output.append(tmp_out)
+        
+    output = pd.DataFrame(output, columns = {'thres':0, 'recall':1, 'precision':2, 'f1_score':3, 'fpr':4, 'tpr':5})
+    out_init = pd.DataFrame([0, 1, 0, 0, 1, 1]).T
+    out_init.columns = {'thres':0, 'recall':1, 'precision':2, 'f1_score':3, 'fpr':4, 'tpr':5}
+    output_1 = pd.concat([out_init, output])
+    return output_1    
+    
+
+
+# 计算推荐性能好坏的指标值
+def MAP_calculate(uid_list_in, base_in):
+    user_ap_list = []
+    for i in range(len(uid_list_in)):   
+        tmp_list = base_in[(base_in['user_id'] == uid_list_in[i])].reset_index(drop = True)
+        tmp_list = tmp_list[['jd_no','y1','y','y_s']].sort_values(by = 'y1', ascending = False).reset_index(drop = True)
+        tmp_list = tmp_list.reset_index().rename(columns = {'index':'rank', 'y1':'score'})
+        tmp_list['rank'] = tmp_list['rank'] + 1
+        
+        # 取投递过的
+        tmp_list = tmp_list[tmp_list.y > 0].reset_index(drop = True)
+        
+        # AP for each user, and MAP for a set of users
+            # delivered
+        tmp_d = tmp_list[(tmp_list.y == 1)].reset_index(drop = True)
+        ap_d = 0
+        for j in range(len(tmp_d)):
+            ap_d = ap_d + (j+1) / tmp_d['rank'][j]
+            #print((j+1) / tmp_d['rank'][j])
+        ap_d = ap_d / len(tmp_d)
+        
+            # satisfied
+        tmp_s = tmp_list[(tmp_list.y_s == 1)].reset_index(drop = True)
+        ap_s = 0
+        for j in range(len(tmp_s)):
+            ap_s = ap_s + (j+1) / tmp_s['rank'][j]
+        ap_s = ap_s / len(tmp_s)
+        
+        user_ap_list.append([uid_list_in[i], ap_d, ap_s])
+    
+    user_ap_list = pd.DataFrame(user_ap_list, columns = {'user_id':0, 'ap_d':1, 'ap_s':2})
+    
+    MAP = 0.7 * user_ap_list.ap_d.mean() + 0.3 * user_ap_list.ap_s.mean()
+    print(MAP)
+    return user_ap_list, MAP
+
+
+
+# ----- modeling -----
+clf_mode = 'XGB'    
+
+X = set_train.drop(['user_id','jd_no','y','y_s'],1)
+Y = set_train[['y']]
+X_1 = set_test.drop(['user_id','jd_no','y','y_s'],1)
+Y_1 = set_test[['y']]
+
+
+if clf_mode == 'LR' :
+    clf = LogisticRegression().fit(X,Y)
+elif clf_mode == 'XGB':  
+    clf = XGBClassifier(max_dpeth = 3, slient = 1).fit(X,Y)
+     
+y_fit = pd.DataFrame( clf.predict_proba(X), columns = {'y0':0, 'y1':1} )
+y_pred = pd.DataFrame( clf.predict_proba(X_1), columns = {'y0':0, 'y1':1} )
+
+roc_list = model_curve_logr1(Y, y_fit[['y1']], 0.001, 1)
+auc_train = metrics.roc_auc_score(Y, y_fit[['y1']])
+auc_test = metrics.roc_auc_score(Y_1,y_pred[['y1']])
+
+print(auc_train)
+print(auc_test)
+
+
+# ---- 最好能把MAP评价的代码固化-----
+# 第一步，基于评分推荐
+recommand_train = pd.merge(set_train[['user_id','jd_no','y','y_s']], y_fit[['y1']], how = 'left', left_index = True, right_index = True)
+recommand_test = pd.merge(set_test[['user_id','jd_no','y','y_s']], y_pred[['y1']], how = 'left', left_index = True, right_index = True)
+print(recommand_test[:10])
+
+
+# 第二步，计算MAP
+ap_list_train, MAP_train = MAP_calculate(list(set(set_train['user_id'])), recommand_train)
+ap_list_test, MAP_test = MAP_calculate(list(set(set_test['user_id'])), recommand_test)
+
+
+
+
+
+
+
+
